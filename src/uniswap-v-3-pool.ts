@@ -1,95 +1,104 @@
-import { BigInt } from "@graphprotocol/graph-ts"
-import {
-  UniswapV3Pool,
-  Burn,
-  Collect,
-  CollectProtocol,
-  Flash,
-  IncreaseObservationCardinalityNext,
-  Initialize,
-  Mint,
-  SetFeeProtocol,
-  Swap
-} from "../generated/UniswapV3Pool/UniswapV3Pool"
-import { ExampleEntity } from "../generated/schema"
+import { BigDecimal, BigInt, Bytes } from "@graphprotocol/graph-ts";
+import { concat } from "@graphprotocol/graph-ts/helper-functions";
+import { Swap } from "../generated/UniswapV3Pool/UniswapV3Pool";
+import { Candle } from "../generated/schema";
 
-export function handleBurn(event: Burn): void {
-  // Entities can be loaded from the store using a string ID; this ID
-  // needs to be unique across all entities of the same type
-  let entity = ExampleEntity.load(event.transaction.from.toHex())
+const ZERO_BI = BigInt.fromI32(0);
+const ZERO_BD = BigDecimal.fromString("0");
+const Q192 = BigInt.fromI32(2).pow(192);
 
-  // Entities only exist after they have been saved to the store;
-  // `null` checks allow to create entities on demand
-  if (!entity) {
-    entity = new ExampleEntity(event.transaction.from.toHex())
-
-    // Entity fields can be set using simple assignments
-    entity.count = BigInt.fromI32(0)
+function safeDiv(amount0: BigDecimal, amount1: BigDecimal): BigDecimal {
+  if (amount1.equals(ZERO_BD)) {
+    return ZERO_BD;
+  } else {
+    return amount0.div(amount1);
   }
-
-  // BigInt and BigDecimal math are supported
-  entity.count = entity.count + BigInt.fromI32(1)
-
-  // Entity fields can be set based on event parameters
-  entity.owner = event.params.owner
-  entity.tickLower = event.params.tickLower
-
-  // Entities can be written to the store with `.save()`
-  entity.save()
-
-  // Note: If a handler doesn't require existing field values, it is faster
-  // _not_ to load the entity from the store. Instead, create it fresh with
-  // `new Entity(...)`, set the fields that should be updated and save the
-  // entity back to the store. Fields that were not set or unset remain
-  // unchanged, allowing for partial updates to be applied.
-
-  // It is also possible to access smart contracts from mappings. For
-  // example, the contract that has emitted the event can be connected to
-  // with:
-  //
-  // let contract = Contract.bind(event.address)
-  //
-  // The following functions can then be called on this contract to access
-  // state variables and other data:
-  //
-  // - contract.burn(...)
-  // - contract.collect(...)
-  // - contract.collectProtocol(...)
-  // - contract.factory(...)
-  // - contract.fee(...)
-  // - contract.feeGrowthGlobal0X128(...)
-  // - contract.feeGrowthGlobal1X128(...)
-  // - contract.liquidity(...)
-  // - contract.maxLiquidityPerTick(...)
-  // - contract.mint(...)
-  // - contract.observations(...)
-  // - contract.observe(...)
-  // - contract.positions(...)
-  // - contract.protocolFees(...)
-  // - contract.slot0(...)
-  // - contract.snapshotCumulativesInside(...)
-  // - contract.swap(...)
-  // - contract.tickBitmap(...)
-  // - contract.tickSpacing(...)
-  // - contract.ticks(...)
-  // - contract.token0(...)
-  // - contract.token1(...)
 }
 
-export function handleCollect(event: Collect): void {}
+function exponentToBigDecimal(decimals: number): BigDecimal {
+  return BigInt.fromI32(10)
+    .pow(decimals as u8)
+    .toBigDecimal();
+}
 
-export function handleCollectProtocol(event: CollectProtocol): void {}
+function convertTokenToDecimal(
+  tokenAmount: BigInt,
+  exchangeDecimals: number
+): BigDecimal {
+  return tokenAmount.toBigDecimal().div(exponentToBigDecimal(exchangeDecimals));
+}
 
-export function handleFlash(event: Flash): void {}
+function sqrtPriceX96ToTokenPrices(
+  sqrtPriceX96: BigInt,
+  token0Decimals: number,
+  token1Decimals: number
+): BigDecimal[] {
+  let num = sqrtPriceX96.times(sqrtPriceX96).toBigDecimal();
+  let denom = BigDecimal.fromString(Q192.toString());
+  let price1 = num
+    .div(denom)
+    .times(exponentToBigDecimal(token0Decimals))
+    .div(exponentToBigDecimal(token1Decimals));
 
-export function handleIncreaseObservationCardinalityNext(
-  event: IncreaseObservationCardinalityNext
-): void {}
+  let price0 = safeDiv(BigDecimal.fromString("1"), price1);
+  return [price0, price1];
+}
 
-export function handleInitialize(event: Initialize): void {}
+export function handleSwap(event: Swap): void {
+  const decimals = 18;
 
-export function handleMint(event: Mint): void {}
+  let amount0 = convertTokenToDecimal(event.params.amount0, decimals);
+  let amount1 = convertTokenToDecimal(event.params.amount1, decimals);
 
-export function handleSetFeeProtocol(event: SetFeeProtocol): void {}
+  // need absolute amounts for volume
+  let token0Amount = amount0;
+  if (amount0.lt(ZERO_BD)) {
+    token0Amount = amount0.times(BigDecimal.fromString("-1"));
+  }
+  let token1Amount = amount1;
+  if (amount1.lt(ZERO_BD)) {
+    token1Amount = amount1.times(BigDecimal.fromString("-1"));
+  }
 
-export function handleSwap(event: Swap): void {}
+  let prices = sqrtPriceX96ToTokenPrices(
+    event.params.sqrtPriceX96,
+    decimals,
+    decimals
+  );
+  let price = prices[1];
+
+  let timestamp = event.block.timestamp.toI32();
+
+  let periods: i32[] = [5 * 60, 15 * 60, 60 * 60, 4 * 60 * 60, 24 * 60 * 60];
+  for (let i = 0; i < periods.length; i++) {
+    let time_id = timestamp / periods[i];
+    let candle_id = concat(
+      concat(Bytes.fromI32(time_id), Bytes.fromI32(periods[i])),
+      event.address
+    ).toHex();
+    let candle = Candle.load(candle_id);
+    if (candle === null) {
+      candle = new Candle(candle_id);
+      candle.t = timestamp;
+      candle.period = periods[i];
+      candle.pair = event.address;
+      candle.o = price;
+      candle.l = price;
+      candle.h = price;
+      candle.v0 = BigDecimal.fromString("0");
+      candle.v1 = BigDecimal.fromString("0");
+    } else {
+      if (price < candle.l) {
+        candle.l = price;
+      }
+      if (price > candle.h) {
+        candle.h = price;
+      }
+    }
+
+    candle.c = price;
+    candle.v0 = candle.v0.plus(token0Amount);
+    candle.v1 = candle.v1.plus(token1Amount);
+    candle.save();
+  }
+}

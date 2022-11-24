@@ -1,6 +1,14 @@
-type ExampleEntity @entity {
-  id: ID!
-  count: BigInt!
-  owner: Bytes! # address
-  tickLower: Int! # int24
+type Candle @entity {
+    id: ID! # time + period + srcToken + dstToken
+    period: Int!
+    pair: Bytes!
+
+    t: Int!
+    o: BigDecimal!
+    h: BigDecimal!
+    l: BigDecimal!
+    c: BigDecimal!
+
+    v0: BigDecimal!
+    v1: BigDecimal!
 }
